@@ -1,6 +1,6 @@
 # rea-jazz
 
-An unofficial lighting controller for the AJAZZ AK992 Retro keyboard in its wired single-colour build (USB `1A2C:9C00`). It sets the built-in lighting modes, brightness and speed, and it drives a visualizer that pulses the ice blue backlight with whatever the PC is playing. The HID protocol was reverse-engineered from the vendor Windows app, so the vendor app does not need to be installed and its kernel filter driver is not used.
+An unofficial lighting controller for the AJAZZ AK992 Retro keyboard in its wired single-colour build (USB `1A2C:9C00`). It sets the built-in lighting modes, brightness and speed. The HID protocol was reverse-engineered from the vendor Windows app, so the vendor app does not need to be installed and its kernel filter driver is not used.
 
 ## Download
 
@@ -10,20 +10,16 @@ A prebuilt `AK992Lighting.exe` is attached to the GitHub Releases page. It is a 
 
 Start `AK992Lighting.exe`. Pick a mode from the dropdown, set brightness and speed with the sliders, then press Apply. The Reconnect button reopens the config channel if the keyboard was unplugged.
 
-The visualizer button pulses brightness with the audio the PC is currently playing. It records from the default speaker with WASAPI loopback, so it does not use a microphone and does not pick up room sound. The gain slider scales the level, and it can be moved while the visualizer runs. Pressing Stop restores the mode that is selected in the mode box.
 
 ## CLI usage
 
 ```
 python ak992.py info                         show the config channel the tool would use
 python ak992.py mode breathing -b 5 -s 3     set a built-in lighting mode
-python ak992.py visualize                    pulse the backlight with system audio (Ctrl+C to stop)
-python ak992.py visualize --dry-run          same, but print levels instead of sending
 ```
 
 `mode` takes a name plus optional flags: `-b` brightness 1 to 5, `-s` speed 1 to 5, `-d` effect direction (default 0).
 
-`visualize` takes `--fps` (updates per second, default 25), `--gain` (level multiplier, default 1.0), `--restore` (mode to set on exit, default neon) and `--dry-run` (print the levels without touching the keyboard).
 
 Mode names:
 
@@ -35,19 +31,13 @@ snake, diagonal, sine
 
 ## Running from source
 
-Python 3.11.
-
-```
-pip install -r requirements.txt
-```
-
-`soundcard` and `numpy` are only used by the visualizer. The lighting commands work without them.
+Python 3.11. There are no third-party dependencies.
 
 To build the exe:
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --windowed --name AK992Lighting --collect-all soundcard ak992_gui.py
+pyinstaller --onefile --windowed --name AK992Lighting ak992_gui.py
 ```
 
 ## How it works
@@ -58,9 +48,15 @@ The keyboard exposes a vendor HID collection on interface MI_01 with usage page 
 07 FF FF <mode-1> <brightness-1> <speed-1> <slot> <direction>
 ```
 
-These are the same bytes the vendor app builds when a mode is picked in its lighting UI. The vendor music command is only sent to models with a music-capable mode, and the AK992 single-light layout has none, so the visualizer varies the brightness of Steady mode instead. The packet layouts and how they were recovered are in [FINDINGS.md](FINDINGS.md).
+These are the same bytes the vendor app builds when a mode is picked in its lighting UI. The packet layouts, the firmware's command parser and how they were recovered are in [FINDINGS.md](FINDINGS.md).
 
-The code refuses to send any command prefix it has not traced to the lighting UI. It never reads or writes firmware.
+The code refuses to send any command prefix it has not traced to the lighting UI, and it hard-blocks `07 EE`, which the firmware treats as a bootloader request. It never reads or writes firmware.
+
+The keyboard stores the current mode in non-volatile memory. To avoid wearing that memory out, `set_mode` runs at most once per second.
+
+## What this model cannot do
+
+The single-light AK992 firmware has no per-key lighting command and no lighting mode that shows music data. Both were tested on hardware. A music visualizer or per-key effects would need different firmware, and this project does not flash firmware.
 
 ## Compatibility
 
