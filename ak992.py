@@ -6,8 +6,6 @@ Only commands traced to the lighting UI are allowed to be sent.
 usage:
   python ak992.py info                         show the config channel the tool would use
   python ak992.py mode breathing -b 5 -s 3     set a built-in lighting mode
-  python ak992.py visualize                    pulse the backlight with system audio (Ctrl+C to stop)
-  python ak992.py visualize --dry-run          same, but print levels instead of sending
 """
 import argparse
 import ctypes as C
@@ -23,6 +21,13 @@ REPORT_ID = 0x07
 ALLOWED_PREFIXES = {
     "mode": bytes([0x07, 0xFF, 0xFF]),  # FUN_0041a500: set light mode
 }
+
+# Firmware handler for 07 EE DD sets a 0xAA flag that looks like a bootloader request. Never send it.
+NEVER_SEND_PREFIXES = (bytes([0x07, 0xEE]),)
+
+# The keyboard saves the mode to non-volatile memory, so frequent mode changes could wear it out.
+# set_mode() refuses to run more often than this.
+MIN_MODE_INTERVAL = 1.0
 
 # Mode numbers from layouts/KB-K102.xml, names from language/1033.lan.
 MODES = {
@@ -120,6 +125,7 @@ class AK992:
             caps = _caps(h)
             if caps and caps.UsagePage == CONFIG_USAGE_PAGE and caps.Usage == CONFIG_USAGE:
                 self.handle, self.path, self.report_len = h, path, caps.FeatureReportByteLength
+                self._last_mode = float("-inf")
                 return
             k32.CloseHandle(h)
         raise RuntimeError("AK992 config channel (1A2C:9C00, usage page 0xFF01) not found. Is it plugged in?")
@@ -128,6 +134,8 @@ class AK992:
         k32.CloseHandle(self.handle)
 
     def send(self, packet: bytes):
+        if any(packet.startswith(p) for p in NEVER_SEND_PREFIXES):
+            raise ValueError(f"refusing to send blocked command {packet.hex(' ')}")
         if not any(packet.startswith(p) for p in ALLOWED_PREFIXES.values()):
             raise ValueError(f"refusing to send untraced command {packet.hex(' ')}")
         if len(packet) > self.report_len:
@@ -140,26 +148,15 @@ class AK992:
         """Same packet the vendor app sends when a mode is picked (brightness and speed are 1..5)."""
         if mode not in MODES.values():
             raise ValueError(f"unknown mode {mode}")
+        wait = self._last_mode + MIN_MODE_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self._last_mode = time.monotonic()
         brightness = max(1, min(BRIGHTNESS_MAX, brightness))
         speed = max(1, min(SPEED_MAX, speed))
         self.send(ALLOWED_PREFIXES["mode"] + bytes([mode - 1, brightness - 1, speed - 1, 0, direction & 0xFF]))
 
 
-def audio_levels(rate=48000, block=1024, gain=1.0):
-    """Yield 0..255 loudness levels from the default speaker's loopback."""
-    import numpy as np
-    import soundcard as sc
-
-    speaker = sc.default_speaker()
-    mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
-    peak = 1e-3
-    with mic.recorder(samplerate=rate, blocksize=block) as rec:
-        while True:
-            data = rec.record(numframes=block)
-            rms = float(np.sqrt(np.mean(np.square(data)))) if data.size else 0.0
-            # Track a slowly decaying peak so quiet and loud songs both use the full range.
-            peak = max(rms, peak * 0.995, 1e-3)
-            yield int(min(255, 255 * gain * rms / peak))
 
 
 def cmd_info(_):
@@ -177,33 +174,6 @@ def cmd_mode(args):
         kb.close()
 
 
-def cmd_visualize(args):
-    """Steady mode, brightness 1..5 following the music. Restores the given mode on exit."""
-    kb = None if args.dry_run else AK992()
-    smooth, interval, last_sent, last = 0.0, 1.0 / args.fps, None, 0.0
-    print("visualizer running, Ctrl+C to stop")
-    try:
-        for level in audio_levels(gain=args.gain):
-            # Fast attack, slower release, so beats pop and the lights do not flicker.
-            smooth = level if level > smooth else smooth * 0.7 + level * 0.3
-            now = time.monotonic()
-            if now - last < interval:
-                continue
-            last = now
-            b = 1 + round(smooth / 255 * (BRIGHTNESS_MAX - 1))
-            if kb:
-                if b != last_sent:
-                    kb.set_mode(MODES["steady"], b)
-                    last_sent = b
-            else:
-                print(f"{int(smooth):3d} b={b} " + "#" * (int(smooth) // 8))
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if kb:
-            kb.set_mode(MODES[args.restore], BRIGHTNESS_MAX)
-            kb.close()
-
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -215,12 +185,6 @@ def main(argv=None):
     m.add_argument("-s", "--speed", type=int, default=4, help="1..5 (default 4)")
     m.add_argument("-d", "--direction", type=int, default=0, help="effect direction (default 0)")
     m.set_defaults(func=cmd_mode)
-    v = sub.add_parser("visualize", help="pulse the backlight with system audio")
-    v.add_argument("--fps", type=float, default=25.0, help="updates per second (default 25)")
-    v.add_argument("--gain", type=float, default=1.0, help="level multiplier (default 1.0)")
-    v.add_argument("--restore", choices=MODES, default="neon", help="mode to set on exit (default neon)")
-    v.add_argument("--dry-run", action="store_true", help="print levels, do not touch the keyboard")
-    v.set_defaults(func=cmd_visualize)
     args = ap.parse_args(argv)
     args.func(args)
 
