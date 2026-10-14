@@ -1,0 +1,8 @@
+# Vendor software is AJAZZ's copyrighted code; do not publish it.
+driver/
+*.zip
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
