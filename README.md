@@ -64,7 +64,7 @@ The code refuses to send any command prefix it has not traced to the lighting UI
 
 ## Compatibility
 
-Written for the wired single-light AK992, USB `1A2C:9C00`. The 2.4G and RGB variants use a different command header and are not supported.
+Tested on the wired single-light AK992, USB `1A2C:9C00`. The 2.4G and RGB variants use a different command header and are not supported.
 
 ## License
 
