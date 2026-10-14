@@ -67,11 +67,39 @@ The 64-byte buffers are built from 8-byte sub-chunks, each starting with `07`. T
 - So the mode packet is `07 FF FF <mode-1> <brightness-1> <((colorindex<<4)|speed)-1> <slot if config_func&0x100> <direction>`. Brightness and speed are 1..5 in the app.
 - Music mode is gated. `FUN_0041a680` feeds `|sample| >> 8` to the music sender only when the music tab is active and the current mode has `config_func & 0x200`. For this model that is only the commented-out `mode="21" attribute="512"`, so the app never sends music packets to the single-light AK992. The visualizer instead varies Steady-mode brightness with the audio.
 
+## Firmware analysis (2026-10-15)
+
+The firmware updater `700N(0X3B4F)defineV9_20230316.exe` carries the image as PE resource `BIN/115`: 32,768 bytes at file offset `0x2C1AC4`. It is not encrypted (entropy 5.5 bits/byte, `FF` padding). The CPU uses 16-bit little-endian instruction words, probably a Holtek-style 8-bit MCU. The partial decode below is inferred from context only: `c0xx`/`c2xx` load, `e0xx`/`e2xx` store, `20xx` A = immediate, `38xx` XOR A with immediate, `30xx` AND A with immediate, `84xx`/`94xx` skip on a bit of a register (`03` is STATUS), `4xxx`/`5xxx` JMP to word `x & 0x1FFF`, `6xxx`/`7xxx` CALL, and `e040` after a masked load is a computed jump through the following table.
+
+Command parser at `0x1BC0`. The first received byte is in RAM `0x70`, and later bytes are read through `[0x0E]`:
+
+| Command | Handler (byte addr) | Notes |
+|---|---|---|
+| `07 EE DD` | `0x1D52` | Writes `0xAA` to RAM `0xFF`, nothing else. Looks like a bootloader request flag. **Never send.** |
+| `07 F0 AA` | `0x3C2C` | Reset |
+| `07 FF FF m b s x d` | `0x3528` | Set mode. Rejects mode index > `0x13` (modes 1..20 only), brightness > 5, speed > 5. Out-of-range values fall back to the default (mode 5, Neon stream). |
+| `07 01 23 45 67` | `0x1CC8` | Key-map upload begin |
+| `07 76 54 32 10` | `0x1CDC` | Macro-table upload begin |
+| `07 23 45 67 89 s l` | `0x1C3C` | Music. Style `s & 3`; styles 0/1 copy level `l` into RAM `0xA0..0xB4` (21 columns), styles 2/3 build a bar. |
+| `07 88 ...`, `07 99 ...` | | Upload chunks |
+| `07 AB CD EF`, `07 FE DC BA DD` | | Upload ends |
+
+`07 12 34 56 78` (per-key custom light) is **not handled** by this firmware.
+
+Hardware tests on the user's keyboard:
+- Music packets in mode 21: no response to the level. Mode 21 is out of range and shows Neon stream (a left-to-right flow).
+- Music packets in Steady mode, at fixed levels 0/128/255 and styles 1/2: no visible change.
+- Per-key begin/set/save, with key byte as LED index or HID code and on = 1 or 0xFF: no change. The user's Fn-recorded preset (mode 2) was untouched. The save packet stalls (NAK) if sent within ~1 ms of the previous packet.
+- The mode survives an unplug/replug, so it is stored in non-volatile memory. Frequent `set_mode` calls may wear that memory, so the brightness-pulse visualizer was removed in v0.2.0 and `set_mode` is rate-limited to once per second.
+- Feature reports take about 1 ms each.
+
+Conclusion: over USB, this model supports only the 19 built-in animations (modes 1, 3..20), brightness 1..5, speed 1..5, direction, and the on-keyboard custom preset (mode 2). A music or per-key visualizer would need different firmware.
+
 ## Next steps
 
 1. Set up Ghidra 12.1.x and JDK 21 so REA's decompiler works. Portable zips are in `C:\Users\Rohaan\tools`. Check that they are complete (the Ghidra download may have stopped at 0 bytes). Set `GHIDRA_INSTALL_DIR` and `JAVA_HOME`.
 2. Decompile the callers of `0x436118` and `0x436324`. Map the packet byte layout for mode, brightness, speed, colour, direction, and per-key RGB.
 3. Done: `ak992.py` opens COL07 and sends 8-byte feature reports. It refuses any prefix not in its allow-list. Never add anything traced to the firmware or upgrade path.
-4. Windows GUI app on top of `ak992.py`.
+4. Done: Windows GUI app (`ak992_gui.py`), released as an exe.
 
 `tools/hidcaps.py` (fixed probe) and `tools/ghidra_scripts/DecompileRefs.java` are in the repo. The Ghidra project and the earlier `builders.c` dump are in the old session scratchpad, `G:\UsrTemp\claude\f--Documents-rea-jazz\d1186910-4ec5-4f89-a51b-8e98414fc5e8\scratchpad\`. Re-import into a new project if that folder is gone (about 3 minutes).
