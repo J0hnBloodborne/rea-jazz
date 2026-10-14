@@ -6,3 +6,9 @@ __pycache__/
 build/
 dist/
 *.spec
+
+# Firmware image and anything derived from it in bulk are AJAZZ code; keep them local.
+firmware/*.bin
+firmware/listing.txt
+firmware/census.txt
+firmware/isa_notes.txt
