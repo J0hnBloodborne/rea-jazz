@@ -95,6 +95,24 @@ Hardware tests on the user's keyboard:
 
 Conclusion: over USB, this model supports only the 19 built-in animations (modes 1, 3..20), brightness 1..5, speed 1..5, direction, and the on-keyboard custom preset (mode 2). A music or per-key visualizer would need different firmware.
 
+## Firmware disassembly (night of 2026-10-15)
+
+The instruction set is now decoded well enough to read the important routines; see `firmware/ISA.md` and `firmware/dis.py`. The keyboard reports manufacturer "SEMICO" and device version `0x0116`. The image's 16-bit word sum is `0x2B4F`, against `0X3B4F` in the updater's filename.
+
+What the code shows:
+- **Settings live in an external I2C EEPROM** (24Cxx-style, device `0xA0`, bit-banged on port `0x0B`), not in MCU flash. The set-mode handler does not write it directly; it raises a flag and a later routine saves. The 1 s rate limit in `ak992.py` stays.
+- **LED frame buffer** is RAM `0xA0`-`0xB4`, one byte per keyboard column (21 columns). The scan driver at `0x2000` reads it in 5 phases and drives port `0x05`. Because the user's preset lights single keys inside a column (X but not S), each column byte most likely holds one bit per row. Unconfirmed.
+- **Lighting dispatcher** (`0x23D4`): if the music flag (`0xEF`) is set, or the mode is custom (index 1, the Fn preset), it skips all effect code. Otherwise it runs the current mode's effect, which redraws the buffer every frame.
+- **Music command** (`0x0E1E`): style 0/1 writes the level byte into all 21 columns; style 2/3 draws a bar of `0x80` columns from the right edge (0, 2, 6, 9, 13, 17 or 21 columns by level). The music flag lasts one frame, so in animated modes the next effect frame overwrites the music data. That explains why the music tests in Steady and mode 21 showed nothing.
+- **Untested prediction:** in custom mode (mode 2) nothing overwrites the buffer, so music packets should stay visible. `tools/music_custom_test.py` checks this step by step (all on/off, one bit at a time to find row mapping, bar levels).
+- `07 EE DD` sets `0xFF = 0xAA`; the interrupt handler checks that flag before resetting the MCU. This is the update path. Never send it.
+
+### What per-key control would take
+
+With stock firmware: if the test confirms bits = rows, music style 1 gives row control (same pattern in every column) and style 2 gives a column bar. Arbitrary per-key patterns are not reachable over USB.
+
+With patched firmware: a new command that writes one column byte (`[0xA0 + col] = value`) is about 10 instructions, and there is about 8 KB of free code space. Combined with custom mode, that gives full per-key control at USB speed. The hard part is flashing it: the only known route is the vendor updater's protocol through `07 EE DD`. That protocol is not decoded, and a failed update could leave the keyboard unusable until it is reflashed. Do not attempt this without a recovery plan (the MCU's programming pins and a programmer).
+
 ## Next steps
 
 1. Set up Ghidra 12.1.x and JDK 21 so REA's decompiler works. Portable zips are in `C:\Users\Rohaan\tools`. Check that they are complete (the Ghidra download may have stopped at 0 bytes). Set `GHIDRA_INSTALL_DIR` and `JAVA_HOME`.
