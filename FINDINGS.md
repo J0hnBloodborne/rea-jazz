@@ -104,12 +104,12 @@ What the code shows:
 - **LED frame buffer** is RAM `0xA0`-`0xB4`, one byte per keyboard column (21 columns). The scan driver at `0x2000` reads it in 5 phases and drives port `0x05`. Because the user's preset lights single keys inside a column (X but not S), each column byte most likely holds one bit per row. Unconfirmed.
 - **Lighting dispatcher** (`0x23D4`): if the music flag (`0xEF`) is set, or the mode is custom (index 1, the Fn preset), it skips all effect code. Otherwise it runs the current mode's effect, which redraws the buffer every frame.
 - **Music command** (`0x0E1E`): style 0/1 writes the level byte into all 21 columns; style 2/3 draws a bar of `0x80` columns from the right edge (0, 2, 6, 9, 13, 17 or 21 columns by level). The music flag lasts one frame, so in animated modes the next effect frame overwrites the music data. That explains why the music tests in Steady and mode 21 showed nothing.
-- **Untested prediction:** in custom mode (mode 2) nothing overwrites the buffer, so music packets should stay visible. `tools/music_custom_test.py` checks this step by step (all on/off, one bit at a time to find row mapping, bar levels).
+- **Prediction failed on hardware (2026-10-15):** `tools/music_custom_test.py` put the keyboard in custom mode (mode 2) and streamed music data (all off/on, single bits, bar levels). The user's preset stayed on screen with no change at any step. Possible causes: the keyboard runs a different firmware version than the updater image (device reports `0x0116`), custom mode draws from a separate per-key map rather than `0xA0`-`0xB4`, or a medium-confidence opcode in the dispatcher path is misread.
 - `07 EE DD` sets `0xFF = 0xAA`; the interrupt handler checks that flag before resetting the MCU. This is the update path. Never send it.
 
 ### What per-key control would take
 
-With stock firmware: if the test confirms bits = rows, music style 1 gives row control (same pattern in every column) and style 2 gives a column bar. Arbitrary per-key patterns are not reachable over USB.
+With stock firmware: nothing beyond the built-in modes, brightness, speed and the Fn preset responds over USB. Per-key commands, hidden modes and music data were all tested on hardware with no visible effect.
 
 With patched firmware: a new command that writes one column byte (`[0xA0 + col] = value`) is about 10 instructions, and there is about 8 KB of free code space. Combined with custom mode, that gives full per-key control at USB speed. The hard part is flashing it: the only known route is the vendor updater's protocol through `07 EE DD`. That protocol is not decoded, and a failed update could leave the keyboard unusable until it is reflashed. Do not attempt this without a recovery plan (the MCU's programming pins and a programmer).
 
