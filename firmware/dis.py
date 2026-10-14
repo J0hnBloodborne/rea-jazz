@@ -1,77 +1,68 @@
-"""Disassembler for the AK992 keyboard MCU firmware (inferred ISA, see ISA.md).
+"""Disassembler for the AK992 keyboard MCU firmware (ELAN EM78-family core, 16-bit words).
 
 usage: python dis.py fw.bin [start_word end_word] > listing.txt
-Word addresses throughout. Mnemonics are hypotheses until marked confirmed in ISA.md.
+Word addresses throughout. Mnemonics follow ELAN's EM78 instruction set (see ISA.md);
+the 16-bit encoding was mapped by matching the EM78 opcode order to this firmware.
 """
 import sys
 
-# RAM names worked out from usage. Extend as functions get understood.
-RAM = {0x00: "IAR", 0x03: "STATUS", 0x04: "MP", 0x0D: "USBA", 0x0E: "USBD", 0x0F: "INTF", 0x40: "PCL"}
+# EM78 standard registers plus names worked out from this firmware.
+RAM = {0x00: "IAR", 0x01: "TCC", 0x02: "PC", 0x03: "STATUS", 0x04: "RSR", 0x05: "P5", 0x06: "P6",
+       0x07: "P7", 0x0B: "PB", 0x0D: "USBA", 0x0E: "USBD", 0x0F: "ISR"}
 
-# E0xx special ops by exact low byte.
-E0_SPECIAL = {0x00: "nop", 0x22: "ret", 0x23: "reti", 0x40: "addpcl a"}
+# E0xx system ops. EM78 sub-opcode s maps to low byte (s & 0x0F) | ((s & 0xF0) << 1).
+SYS = {0x00: "nop", 0x01: "daa", 0x02: "contw", 0x03: "slep", 0x04: "wdtc",
+       0x20: "eni", 0x21: "disi", 0x22: "ret", 0x23: "reti", 0x24: "contr", 0x40: "tbl"}
 
-# Read-modify-write and A-op groups by high byte (operand is RAM low byte).
-MEM_OPS = {
-    0xC0: "mov a, {m}",
-    0xC2: "mov.c2 a, {m}",
-    0xC4: "add a, {m}",
-    0xCA: "sz? {m}",
-    0xCE: "sdz {m}",
-    0xD2: "adc a, {m}",
-    0xD6: "rl {m}",
-    0xD8: "swap a, {m}",
-    0xDA: "swap {m}",
-    0xE2: "mov {m}, a",
-    0xE6: "clr {m}",
-    0xE8: "cmp a, {m}",
-    0xEA: "or {m}, a",
-    0xEE: "xor {m}, a",
-    0xF2: "op.f2 {m}",
-    0xF6: "and {m}, a",
-    0xF8: "xor? a, {m}",
-    0xFA: "op.fa {m}",
-    0xFC: "op.fc {m}",
-    0xFE: "op.fe {m}",
+# Register ops by high byte (low bit of the high byte is address bit 8).
+REG = {
+    0xC0: "mov a, {r}", 0xC2: "mov {r}, {r}", 0xC4: "coma {r}", 0xC6: "com {r}",
+    0xC8: "inca {r}", 0xCA: "inc {r}", 0xCC: "djza {r}", 0xCE: "djz {r}",
+    0xD0: "rrca {r}", 0xD2: "rrc {r}", 0xD4: "rlca {r}", 0xD6: "rlc {r}",
+    0xD8: "swapa {r}", 0xDA: "swap {r}", 0xDC: "jza {r}", 0xDE: "jz {r}",
+    0xE2: "mov {r}, a", 0xE6: "clr {r}",
+    0xE8: "sub a, {r}", 0xEA: "sub {r}, a", 0xEC: "deca {r}", 0xEE: "dec {r}",
+    0xF0: "or a, {r}", 0xF2: "or {r}, a", 0xF4: "and a, {r}", 0xF6: "and {r}, a",
+    0xF8: "xor a, {r}", 0xFA: "xor {r}, a", 0xFC: "add a, {r}", 0xFE: "add {r}, a",
 }
-IMM_OPS = {0x08: "add a, #{i}", 0x12: "sbc a, #{i}", 0x18: "sub a, #{i}", 0x20: "mov a, #{i}",
-           0x28: "or a, #{i}", 0x30: "and a, #{i}", 0x38: "xor a, #{i}"}
+SKIPS = {"djza", "djz", "jza", "jz"}
+IMM = {0x08: "sub a, #{k}", 0x18: "add a, #{k}", 0x20: "mov a, #{k}", 0x28: "or a, #{k}",
+       0x30: "and a, #{k}", 0x38: "xor a, #{k}"}
 
 
-def ram(m):
-    return RAM.get(m, f"[{m:02x}]")
+def reg(r):
+    return RAM.get(r, f"[{r:02x}]")
 
 
 def decode(w, pc=0):
-    """Return (text, kind, target). kind: 'jmp', 'call', 'ret', 'tbl', 'skip', or ''.
-
-    JMP/CALL carry 13 bits; the page bit (0x2000) comes from the current pc.
-    """
+    """Return (text, kind, target). kind: 'jmp', 'call', 'ret', 'tbl', 'skip', 'unk' or ''."""
     hi, lo = w >> 8, w & 0xFF
     top3 = w >> 13
     if top3 in (2, 3):
-        t = (pc & 0x2000) | (w & 0x1FFF)
-        if top3 == 2:
-            return f"jmp L{t:04x}", "jmp", t
-        return f"call F{t:04x}", "call", t
+        t = (pc & 0x2000) | (w & 0x1FFF)  # page bit from the current pc
+        return (f"jmp L{t:04x}", "jmp", t) if top3 == 2 else (f"call F{t:04x}", "call", t)
     if hi == 0x00:
-        return f"ret a, #{lo:02x}", "ret", None
+        return f"retl #{lo:02x}", "ret", None
     if hi == 0xE0:
-        if lo in E0_SPECIAL:
-            op = E0_SPECIAL[lo]
-            return op, {"ret": "ret", "addpcl a": "tbl"}.get(op, ""), None
-        return f"op.e0 {ram(lo)}", "", None
-    if 0x80 <= hi <= 0x9F and hi % 2 == 0:
+        if lo in SYS:
+            op = SYS[lo]
+            return op, {"ret": "ret", "reti": "ret", "tbl": "tbl"}.get(op, ""), None
+        if 0x05 <= lo <= 0x0F:
+            return f"iow {reg(lo)}", "", None
+        if 0x25 <= lo <= 0x2F:
+            return f"ior {reg(lo - 0x20)}", "", None
+        return f".dw {w:04x}  ; sys?", "unk", None
+    if hi == 0xE4 and lo == 0:
+        return "clra", "", None
+    if 0x80 <= hi <= 0xBF and hi % 2 == 0:
         bit = (hi >> 1) & 7
-        # 8x: skip next if bit clear (the next insn runs when the bit is set); 9x: skip if set.
-        return f"{'sset' if hi & 0x10 else 'sclr'} {ram(lo)}.{bit}", "skip", None
-    if 0xA0 <= hi <= 0xBF and hi % 2 == 0:
-        bit = (hi >> 1) & 7
-        return f"{'set' if hi & 0x10 else 'clr'} {ram(lo)}.{bit}", "", None
-    if hi in MEM_OPS:
-        return MEM_OPS[hi].format(m=ram(lo)), "", None
-    if hi in IMM_OPS:
-        return IMM_OPS[hi].format(i=f"{lo:02x}"), "", None
+        op = {0x8: "jbc", 0x9: "jbs", 0xA: "bc", 0xB: "bs"}[hi >> 4]
+        return f"{op} {reg(lo)}, {bit}", "skip" if op[0] == "j" else "", None
+    if hi in REG:
+        text = REG[hi].format(r=reg(lo))
+        return text, "skip" if text.split()[0] in SKIPS else "", None
+    if hi in IMM:
+        return IMM[hi].format(k=f"{lo:02x}"), "", None
     return f".dw {w:04x}  ; ?{hi:02x}", "unk", None
 
 
